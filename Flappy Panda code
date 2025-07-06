@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Flappy Bird Clone</title>
+    <script src="https://cdn.jsdelivr.net/npm/@farcade/game-sdk@latest/dist/index.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #333;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        user-select: none;
+        -webkit-user-select: none;
+        touch-action: none;
+      }
+      canvas {
+        background: #4bb4de; /* Fallback background */
+        max-height: 100vh;
+        max-width: 100vw;
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <script>
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d", { alpha: false });
+
+      let width, height, scale;
+      let gameStarted = false;
+      let gameOver = false;
+      let score = 0;
+      let lastTime = 0;
+      let backgroundOffset = 0;
+      let isMuted = false;
+      let audioContext = null;
+
+      // Web Audio API for fallback
+      function unlockAudioContext() {
+        if (!audioContext) {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioContext.state === "suspended") {
+          audioContext
+            .resume()
+            .then(() => {
+              console.log("AudioContext resumed");
+            })
+            .catch((e) => console.error("Failed to resume AudioContext:", e));
+        }
+      }
+
+      // Play audio via Web Audio API with duration limit for background
+      async function playAudioViaWebAudio(url, loop = false, maxDuration = null) {
+        try {
+          const response = await fetch(url, { mode: "cors" });
+          if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+          const arrayBuffer = await response.arrayBuffer();
+          const buffer = await audioContext.decodeAudioData(arrayBuffer);
+          const source = audioContext.createBufferSource();
+          source.buffer = buffer;
+          source.loop = loop;
+          source.connect(audioContext.destination);
+          source.start();
+          console.log(`Playing ${url} via Web Audio API`);
+
+          // Handle 30-second loop for background music
+          if (loop && maxDuration) {
+            const checkTime = () => {
+              if (audioContext.currentTime - source.startTime >= maxDuration) {
+                source.stop();
+                source.start();
+                source.startTime = audioContext.currentTime;
+              }
+              if (source.loop) {
+                setTimeout(checkTime, 1000);
+              }
+            };
+            source.startTime = audioContext.currentTime;
+            setTimeout(checkTime, 1000);
+          }
+
+          return source;
+        } catch (e) {
+          console.error(`Web Audio API failed for ${url}:`, e);
+          return null;
+        }
+      }
+
+      const bird = {
+        x: 0,
+        y: 0,
+        velocity: 0,
+        radius: 15,
+        gravity: 0.3,
+        jump: -7,
+        rotation: 0,
+        width: 34,
+        height: 24,
+      };
+
+      const pipes = [];
+      const particles = [];
+      const pipeWidth = 70;
+      const pipeGap = 200;
+      const pipeSpacing = 200;
+      const backgroundSpeed = 1;
+
+      // Load images
+      const images = {
+        background: new Image(),
+        cloud: new Image(),
+        bird: new Image(),
+        pipe: new Image(),
+      };
+
+      // Load audio
+      const audio = {
+        tap: new Audio(),
+        background: new Audio(),
+        gameOver: new Audio(),
+        backgroundSource: null,
+        tapSource: null,
+        gameOverSource: null,
+      };
+
+      // Set image URLs
+      images.background.src = "https://i.postimg.cc/N9Xbm591/background.png";
+      images.cloud.src = "https://i.postimg.cc/NLQmYXyX/494a9c47-b8fa-445c-9b17-1d0d87c5a540-removalai-preview.png";
+      images.bird.src = "https://i.postimg.cc/bDQyM9Sd/bird.png";
+      images.pipe.src = "https://i.postimg.cc/RqBK0PRs/pipe.png";
+
+      // Set audio URLs (Google Drive direct links)
+      audio.tap.src = "https://drive.google.com/uc?export=download&id=1RMEmiQ6I83KXmR8mq45xXtYSPESCCgGA";
+      audio.background.src = "https://drive.google.com/uc?export=download&id=1RLLfE0X7-8tQm-QF5-7h965sgDnEXmji";
+      audio.gameOver.src = "https://drive.google.com/uc?export=download&id=1RSS5z3xHZVbsTTW38DS3U8NZ_8SwFZVP";
+
+      // Configure audio
+      audio.tap.crossOrigin = "anonymous";
+      audio.background.crossOrigin = "anonymous";
+      audio.gameOver.crossOrigin = "anonymous";
+      audio.background.volume = 0.5;
+      audio.background.loop = true;
+      audio.background.addEventListener("timeupdate", () => {
+        if (audio.background.currentTime >= 30) {
+          audio.background.currentTime = 0;
+          console.log("Background music reset to 0 at 30 seconds");
+        }
+      });
+
+      // Load tracking
+      let assetsLoaded = 0;
+      const totalImages = Object.keys(images).length;
+      const totalAudio = Object.keys(audio).length - 3; // Exclude source properties
+      const totalAssets = totalImages + totalAudio;
+
+      // Image load handling
+      for (const key in images) {
+        images[key].onload = () => {
+          assetsLoaded++;
+          console.log(`Image loaded: ${key}`);
+          checkAssetsLoaded();
+        };
+        images[key].onerror = () => {
+          console.error(`Failed to load image: ${images[key].src}`);
+          assetsLoaded++;
+          checkAssetsLoaded();
+        };
+      }
+
+      // Audio load handling
+      for (const key in audio) {
+        if (["backgroundSource", "tapSource", "gameOverSource"].includes(key)) continue;
+        audio[key].oncanplaythrough = () => {
+          assetsLoaded++;
+          console.log(`Audio loaded: ${key} (${audio[key].src})`);
+          checkAssetsLoaded();
+        };
+        audio[key].onerror = (e) => {
+          console.error(`Failed to load audio: ${audio[key].src}`, e);
+          assetsLoaded++;
+          checkAssetsLoaded();
+        };
+      }
+
+      function checkAssetsLoaded() {
+        if (assetsLoaded === totalAssets) {
+          console.log("All assets loaded, starting game");
+          resize();
+          requestAnimationFrame(gameLoop);
+          if (window.FarcadeSDK) {
+            window.FarcadeSDK.singlePlayer.actions.ready();
+          }
+        }
+      }
+
+      function resize() {
+        const windowRatio = window.innerWidth / window.innerHeight;
+        const gameRatio = 9 / 16;
+
+        if (windowRatio < gameRatio) {
+          width = window.innerWidth;
+          height = width * (16 / 9);
+        } else {
+          height = window.innerHeight;
+          width = height * (9 / 16);
+        }
+
+        scale = width / 360;
+        canvas.width = width;
+        canvas.height = height;
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+
+        bird.x = width * 0.3;
+        bird.y = height * 0.5;
+        bird.radius = 15 * scale;
+        bird.width = 34 * scale;
+        bird.height = 24 * scale;
+        ctx.scale(scale, scale);
+      }
+
+      function createPipe() {
+        const gap = pipeGap;
+        const minHeight = 50;
+        const maxHeight = height / scale - gap - minHeight;
+        const topHeight = Math.random() * (maxHeight - minHeight) + minHeight;
+
+        pipes.push({
+          x: width / scale,
+          topHeight: topHeight,
+          passed: false,
+        });
+      }
+
+      function createParticle(x, y) {
+        const count = 5;
+        for (let i = 0; i < count; i++) {
+          particles.push({
+            x: x / scale,
+            y: y / scale,
+            vx: (Math.random() - 0.5) * 4,
+            vy: (Math.random() - 0.5) * 4,
+            life: 20,
+            size: Math.random() * 3 + 2,
+          });
+        }
+      }
+
+      function drawBackground() {
+        if (images.background.complete && images.background.naturalWidth) {
+          const img = images.background;
+          const imgRatio = img.naturalWidth / img.naturalHeight;
+          const canvasRatio = width / scale / (height / scale);
+          let drawWidth, drawHeight, offsetX, offsetY;
+
+          if (imgRatio > canvasRatio) {
+            drawHeight = height / scale;
+            drawWidth = drawHeight * imgRatio;
+            offsetX = (drawWidth - width / scale) / -2;
+            offsetY = 0;
+          } else {
+            drawWidth = width / scale;
+            drawHeight = drawWidth / imgRatio;
+            offsetX = 0;
+            offsetY = (drawHeight - height / scale) / -2;
+          }
+
+          ctx.drawImage(img, offsetX, offsetY, drawWidth, drawHeight);
+        } else {
+          ctx.fillStyle = "#4BB4DE";
+          ctx.fillRect(0, 0, width / scale, height / scale);
+        }
+
+        const cloudSize = 80;
+        const cloudSpacing = 200;
+        for (let i = -1; i < 3; i++) {
+          const cloudX = ((backgroundOffset + i * cloudSpacing) % (width / scale + cloudSpacing)) - cloudSpacing;
+          if (images.cloud.complete && images.cloud.naturalWidth) {
+            ctx.drawImage(images.cloud, cloudX, 100, cloudSize, cloudSize);
+          } else {
+            ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+            ctx.beginPath();
+            ctx.arc(cloudX, 100, cloudSize / 2, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+
+      function drawBird() {
+        ctx.save();
+        ctx.translate(bird.x / scale, bird.y / scale);
+        ctx.rotate(bird.rotation);
+        if (images.bird.complete && images.bird.naturalWidth) {
+          ctx.drawImage(
+            images.bird,
+            -bird.width / (2 * scale),
+            -bird.height / (2 * scale),
+            bird.width / scale,
+            bird.height / scale,
+          );
+        } else {
+          ctx.fillStyle = "#FFD700";
+          ctx.beginPath();
+          ctx.moveTo(-bird.width / (2 * scale), 0);
+          ctx.lineTo(bird.width / (4 * scale), -bird.height / (2 * scale));
+          ctx.lineTo(bird.width / (4 * scale), bird.height / (2 * scale));
+          ctx.closePath();
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function drawPipes() {
+        pipes.forEach((pipe) => {
+          const x = pipe.x;
+          ctx.save();
+          ctx.translate(x + pipeWidth / 2, pipe.topHeight);
+          ctx.scale(1, -1);
+          if (images.pipe.complete && images.pipe.naturalWidth) {
+            ctx.drawImage(images.pipe, -pipeWidth / 2, 0, pipeWidth, pipe.topHeight);
+          } else {
+            ctx.fillStyle = "#2ECC71";
+            ctx.fillRect(-pipeWidth / 2, 0, pipeWidth, pipe.topHeight);
+          }
+          ctx.restore();
+
+          if (images.pipe.complete && images.pipe.naturalWidth) {
+            ctx.drawImage(
+              images.pipe,
+              x,
+              pipe.topHeight + pipeGap,
+              pipeWidth,
+              height / scale - (pipe.topHeight + pipeGap),
+            );
+          } else {
+            ctx.fillStyle = "#2ECC71";
+            ctx.fillRect(x, pipe.topHeight + pipeGap, pipeWidth, height / scale - (pipe.topHeight + pipeGap));
+          }
+        });
+      }
+
+      function drawParticles() {
+        ctx.fillStyle = "#FFFFFF";
+        particles.forEach((particle, index) => {
+          particle.x += particle.vx;
+          particle.y += particle.vy;
+          particle.life--;
+          if (particle.life <= 0) {
+            particles.splice(index, 1);
+            return;
+          }
+          ctx.globalAlpha = particle.life / 20;
+          ctx.beginPath();
+          ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+      }
+
+      function drawScore() {
+        ctx.fillStyle = "white";
+        ctx.font = "30px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(score, width / (2 * scale), 50);
+      }
+
+      function drawButtons() {
+        ctx.fillStyle = "#2ECC71";
+        ctx.font = "24px Arial";
+        ctx.textAlign = "center";
+        if (!gameStarted && !gameOver) {
+          ctx.fillRect(width / (2 * scale) - 100, height / (2 * scale) - 30, 200, 60);
+          ctx.fillStyle = "white";
+          ctx.fillText("Start", width / (2 * scale), height / (2 * scale) + 8);
+        } else if (gameOver) {
+          ctx.fillStyle = "#2ECC71";
+          ctx.fillRect(width / (2 * scale) - 100, height / (2 * scale) - 30, 200, 60);
+          ctx.fillStyle = "white";
+          ctx.fillText("Restart", width / (2 * scale), height / (2 * scale) + 8);
+        }
+      }
+
+      function update(delta) {
+        if (!gameStarted || gameOver) return;
+
+        bird.velocity += bird.gravity * (delta / 16);
+        bird.y += bird.velocity * (delta / 16);
+        bird.rotation = Math.min(Math.PI / 4, Math.max(-Math.PI / 4, bird.velocity * 0.05));
+
+        for (let i = pipes.length - 1; i >= 0; i--) {
+          const pipe = pipes[i];
+          pipe.x -= 2 * (delta / 16);
+
+          if (pipe.x < -pipeWidth) {
+            pipes.splice(i, 1);
+            continue;
+          }
+
+          if (!pipe.passed && pipe.x < bird.x / scale - pipeWidth) {
+            pipe.passed = true;
+            score++;
+            if (window.FarcadeSDK) {
+              window.FarcadeSDK.singlePlayer.actions.hapticFeedback();
+            }
+          }
+
+          const birdLeft = bird.x - bird.width / 2;
+          const birdRight = bird.x + bird.width / 2;
+          const birdTop = bird.y - bird.height / 2;
+          const birdBottom = bird.y + bird.height / 2;
+          const pipeLeft = pipe.x * scale;
+          const pipeRight = pipe.x * scale + pipeWidth * scale;
+
+          if (birdRight > pipeLeft && birdLeft < pipeRight) {
+            if (birdTop < pipe.topHeight * scale || birdBottom > (pipe.topHeight + pipeGap) * scale) {
+              gameOver = true;
+              createParticle(bird.x, bird.y);
+              if (!isMuted) {
+                audio.gameOver.play().catch((e) => {
+                  console.error("Game over audio failed:", e);
+                  playAudioViaWebAudio(audio.gameOver.src).then((source) => {
+                    audio.gameOverSource = source;
+                  });
+                });
+              }
+              if (window.FarcadeSDK) {
+                window.FarcadeSDK.singlePlayer.actions.gameOver({ score });
+                window.FarcadeSDK.singlePlayer.actions.hapticFeedback();
+              }
+              if (audio.backgroundSource) {
+                audio.backgroundSource.stop();
+                audio.backgroundSource = null;
+              } else {
+                audio.background.pause();
+              }
+              return;
+            }
+          }
+        }
+
+        if (pipes.length === 0 || pipes[pipes.length - 1].x < width / scale - pipeSpacing) {
+          createPipe();
+        }
+
+        backgroundOffset = (backgroundOffset + backgroundSpeed * (delta / 16)) % (width / scale);
+      }
+
+      function jump() {
+        if (gameOver) return;
+        unlockAudioContext();
+        if (!gameStarted) {
+          gameStarted = true;
+          if (!isMuted) {
+            audio.background.play().catch((e) => {
+              console.error("Background audio failed:", e);
+              playAudioViaWebAudio(audio.background.src, true, 30).then((source) => {
+                audio.backgroundSource = source;
+              });
+            });
+          }
+          return;
+        }
+        bird.velocity = bird.jump;
+        createParticle(bird.x, bird.y);
+        if (!isMuted) {
+          audio.tap.play().catch((e) => {
+            console.error("Tap audio failed:", e);
+            playAudioViaWebAudio(audio.tap.src).then((source) => {
+              audio.tapSource = source;
+            });
+          });
+        }
+        if (window.FarcadeSDK) {
+          window.FarcadeSDK.singlePlayer.actions.hapticFeedback();
+        }
+      }
+
+      function resetGame() {
+        gameStarted = false;
+        gameOver = false;
+        score = 0;
+        pipes.length = 0;
+        particles.length = 0;
+        bird.y = height * 0.5;
+        bird.velocity = 0;
+        bird.rotation = 0;
+        backgroundOffset = 0;
+        if (audio.backgroundSource) {
+          audio.backgroundSource.stop();
+          audio.backgroundSource = null;
+        } else {
+          audio.background.pause();
+        }
+        if (audio.tapSource) {
+          audio.tapSource.stop();
+          audio.tapSource = null;
+        }
+        if (audio.gameOverSource) {
+          audio.gameOverSource.stop();
+          audio.gameOverSource = null;
+        }
+        audio.background.currentTime = 0;
+      }
+
+      function gameLoop(timestamp) {
+        const delta = Math.min(timestamp - lastTime, 33);
+        lastTime = timestamp;
+
+        ctx.clearRect(0, 0, width / scale, height / scale);
+        drawBackground();
+        update(delta);
+        drawPipes();
+        drawParticles();
+        drawBird();
+        drawScore();
+        drawButtons();
+
+        requestAnimationFrame(gameLoop);
+      }
+
+      window.addEventListener("resize", resize);
+      canvas.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        unlockAudioContext();
+        const rect = canvas.getBoundingClientRect();
+        const touchX = (e.touches[0].clientX - rect.left) / scale;
+        const touchY = (e.touches[0].clientY - rect.top) / scale;
+
+        if (
+          !gameStarted &&
+          !gameOver &&
+          touchX > width / (2 * scale) - 100 &&
+          touchX < width / (2 * scale) + 100 &&
+          touchY > height / (2 * scale) - 30 &&
+          touchY < height / (2 * scale) + 30
+        ) {
+          gameStarted = true;
+          if (!isMuted) {
+            audio.background.play().catch((e) => {
+              console.error("Background audio failed:", e);
+              playAudioViaWebAudio(audio.background.src, true, 30).then((source) => {
+                audio.backgroundSource = source;
+              });
+            });
+          }
+        } else if (
+          gameOver &&
+          touchX > width / (2 * scale) - 100 &&
+          touchX < width / (2 * scale) + 100 &&
+          touchY > height / (2 * scale) - 30 &&
+          touchY < height / (2 * scale) + 30
+        ) {
+          resetGame();
+        } else if (gameStarted && !gameOver) {
+          jump();
+        }
+      });
+
+      canvas.addEventListener("click", (e) => {
+        unlockAudioContext();
+        const rect = canvas.getBoundingClientRect();
+        const clickX = (e.clientX - rect.left) / scale;
+        const clickY = (e.clientY - rect.top) / scale;
+
+        if (
+          !gameStarted &&
+          !gameOver &&
+          clickX > width / (2 * scale) - 100 &&
+          clickX < width / (2 * scale) + 100 &&
+          clickY > height / (2 * scale) - 30 &&
+          clickY < height / (2 * scale) + 30
+        ) {
+          gameStarted = true;
+          if (!isMuted) {
+            audio.background.play().catch((e) => {
+              console.error("Background audio failed:", e);
+              playAudioViaWebAudio(audio.background.src, true, 30).then((source) => {
+                audio.backgroundSource = source;
+              });
+            });
+          }
+        } else if (
+          gameOver &&
+          clickX > width / (2 * scale) - 100 &&
+          clickX < width / (2 * scale) + 100 &&
+          clickY > height / (2 * scale) - 30 &&
+          clickY < height / (2 * scale) + 30
+        ) {
+          resetGame();
+        } else if (gameStarted && !gameOver) {
+          jump();
+        }
+      });
+
+      window.addEventListener("keydown", (e) => {
+        if (["Space", "ArrowUp", "KeyW"].includes(e.code)) {
+          e.preventDefault();
+          unlockAudioContext();
+          if (gameOver) {
+            resetGame();
+          } else {
+            jump();
+          }
+        }
+      });
+
+      if (window.FarcadeSDK) {
+        window.FarcadeSDK.on("play_again", resetGame);
+        window.FarcadeSDK.on("toggle_mute", () => {
+          isMuted = !isMuted;
+          console.log("Mute toggled:", isMuted);
+          if (isMuted) {
+            if (audio.backgroundSource) {
+              audio.backgroundSource.stop();
+              audio.backgroundSource = null;
+            } else {
+              audio.background.pause();
+            }
+            if (audio.tapSource) {
+              audio.tapSource.stop();
+              audio.tapSource = null;
+            }
+            if (audio.gameOverSource) {
+              audio.gameOverSource.stop();
+              audio.gameOverSource = null;
+            }
+          } else if (gameStarted && !gameOver) {
+            audio.background.play().catch((e) => {
+              console.error("Background audio failed:", e);
+              playAudioViaWebAudio(audio.background.src, true, 30).then((source) => {
+                audio.backgroundSource = source;
+              });
+            });
+          }
+        });
+      }
+    </script>
+  </body>
+</html>
